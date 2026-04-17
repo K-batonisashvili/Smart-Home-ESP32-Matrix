@@ -1,0 +1,357 @@
+# ==============================================================================
+# 1. CORE CONFIGURATION & BOOT LOGIC
+# ==============================================================================
+esphome:
+  name: transit-tracker
+  friendly_name: Transit Tracker
+  
+  on_boot:
+    priority: -10 
+    then:
+      - wait_until:
+          lambda: 'return id(sntp_time).now().is_valid();'
+      - lambda: |-
+          // Dynamic Brightness
+          float sun_angle = id(boston_sun).elevation();
+          int target;
+          
+          if (sun_angle < 0.0) {
+            target = 10;        // Night
+          } else if (sun_angle < 20.0) {
+            target = 100;       // Dawn / Dusk
+          } else {
+            target = 200;       // Day
+          }
+          
+          // Use the switch state directly
+          id(auto_brightness_switch).publish_state(true);
+          id(current_brightness) = target;
+          id(matrix).set_brightness(target);
+          id(brightness_slider).publish_state(target);
+      - delay: 5s 
+      - script.execute: fetch_weather
+
+substitutions:
+  # --- LOCATION & WEATHER ---
+  my_lat: ""
+  my_lon: ""
+  # --- TRANSIT STOPS & ROUTES ---
+  my_stop_1: ""
+  my_route_1: ""
+  my_name_1: ""
+  my_stop_2: ""
+  my_route_2: ""
+  my_name_2: "" 
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  cpu_frequency: 240MHz
+  framework:
+    type: arduino
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+# ==============================================================================
+# 2. CONNECTIVITY, API ENGINE & SUN
+# ==============================================================================
+http_request:
+  useragent: esphome/transit-tracker
+  timeout: 10s
+  verify_ssl: false
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  manual_ip:
+    static_ip: !secret static_ip
+    gateway: !secret gateway
+    subnet: 255.255.255.0
+    dns1: 8.8.8.8
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+
+logger:
+  level: DEBUG
+  logs:
+    sensor: ERROR
+    text_sensor: ERROR
+
+# Provides live sun elevation based on coordinates
+sun:
+  id: boston_sun
+  latitude: ${my_lat}
+  longitude: ${my_lon}
+
+# ==============================================================================
+# 3. GLOBALS & SENSORS
+# ==============================================================================
+globals:
+  - id: current_brightness
+    type: int
+    initial_value: '10'
+
+sensor:
+  - platform: template
+    name: "Live Brightness Level"
+    id: live_brightness_sensor
+    accuracy_decimals: 0
+    lambda: 'return id(current_brightness);'
+    update_interval: 5s
+
+  - platform: template
+    name: "Dashboard Temperature"
+    id: boston_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 0
+
+  - platform: template
+    name: "Dashboard Wind Speed"
+    id: boston_wind
+    unit_of_measurement: "mph"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: template
+    name: "Dashboard Condition"
+    id: boston_condition
+
+# ==============================================================================
+# 4. WEB DASHBOARD CONTROLS
+# ==============================================================================
+number:
+  - platform: template
+    name: "Manual Brightness Slider"
+    id: brightness_slider
+    min_value: 0
+    max_value: 255
+    step: 1
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |-
+            id(auto_brightness_switch).publish_state(false);
+            id(current_brightness) = (int)x;
+            id(matrix).set_brightness((int)x);
+
+switch:
+  - platform: template
+    name: "Auto Brightness Schedule"
+    id: auto_brightness_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+button:
+  - platform: restart
+    name: "Restart Matrix"
+    id: restart_matrix_button
+
+# ==============================================================================
+# 5. WEATHER FETCH 
+# ==============================================================================
+script:
+  - id: fetch_weather
+    then:
+      - http_request.get:
+          url: "https://api.open-meteo.com/v1/forecast?latitude=${my_lat}&longitude=${my_lon}&current=temperature_2m,weather_code,wind_speed_10m&wind_speed_unit=mph"
+          capture_response: true 
+          max_response_buffer_size: 2048 
+          on_response:
+            then:
+              - lambda: |-
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    if (!root["current"].isNull()) {
+                      if (!root["current"]["temperature_2m"].isNull()) {
+                        id(boston_temp).publish_state(root["current"]["temperature_2m"]);
+                      }
+                      if (!root["current"]["wind_speed_10m"].isNull()) {
+                        id(boston_wind).publish_state(root["current"]["wind_speed_10m"]);
+                      }
+                      if (!root["current"]["weather_code"].isNull()) {
+                        int code = root["current"]["weather_code"];
+                        std::string condition = "Unknown";
+                        
+                        if (code == 0 || code == 1) condition = "Sunny";
+                        else if (code == 2) condition = "Patchy";
+                        else if (code == 3) condition = "Cloudy";
+                        else if (code >= 45 && code <= 48) condition = "Foggy";
+                        else if (code >= 51 && code <= 55) condition = "Drizzle";
+                        else if (code == 56 || code == 57) condition = "Frizzle";
+                        else if (code >= 61 && code <= 65) condition = "Rainy";
+                        else if (code == 66 || code == 67) condition = "Chilly";
+                        else if (code >= 71 && code <= 75) condition = "Snow";
+                        else if (code == 77) condition = "Winter";
+                        else if (code >= 80 && code <= 82) condition = "Showers";
+                        else if (code >= 95 && code <= 99) condition = "Storm";
+
+                        id(boston_condition).publish_state(condition);
+                      }
+                    }
+                    return true; 
+                  });
+
+# ==============================================================================
+# 6. HARDWARE & DISPLAY
+# ==============================================================================
+display:
+  - platform: hub75
+    id: matrix
+    board: adafruit-matrix-portal-s3
+    g1_pin: 40
+    b1_pin: 41
+    g2_pin: 37
+    b2_pin: 39
+    e_pin: 21
+    double_buffer: true
+    update_interval: 32ms
+    panel_width: 64
+    panel_height: 32
+    layout_cols: 2
+    
+    # --- PAGE SYSTEM ---
+    pages:
+      # PAGE 1: Public Transport 
+      - id: page_transit
+        lambda: |-
+          id(tracker).draw_schedule();
+          
+      # PAGE 2: Weather & Wind
+      - id: page_weather
+        lambda: |-
+          if (id(boston_temp).has_state() && id(boston_wind).has_state()) {
+            
+            int center_left = it.get_width() / 4;
+            int center_right = (it.get_width() / 4) * 3;
+            
+            // Dynamic Color Logic for Temperature
+            Color temp_color = id(color_perfect); // Default Green
+            if (id(boston_temp).state <= 5.0) temp_color = id(color_cold); // Blue if cold
+            else if (id(boston_temp).state >= 25.0) temp_color = id(color_hot); // Red if hot
+            
+            // LEFT BOARD: Centered Weather with dynamic color
+            it.printf(center_left, 4, id(pixolletta), temp_color, TextAlign::TOP_CENTER, "Weather");
+            it.printf(center_left, 18, id(pixolletta), temp_color, TextAlign::TOP_CENTER, "%.0f°C %s", id(boston_temp).state, id(boston_condition).state.c_str());
+            
+            // RIGHT BOARD: Centered Wind Speed
+            it.printf(center_right, 4, id(pixolletta), id(route_1_color), TextAlign::TOP_CENTER, "Wind Speed");
+            it.printf(center_right, 18, id(pixolletta), COLOR_ON, TextAlign::TOP_CENTER, "%.0f mph", id(boston_wind).state);
+            
+          } else {
+            it.printf(it.get_width() / 2, 16, id(pixolletta), COLOR_ON, TextAlign::CENTER, "Syncing Weather...");
+          }
+
+      # PAGE 3: Current time
+      - id: page_clock
+        lambda: |-
+          auto time = id(sntp_time).now();
+          if (time.is_valid()) {
+            // Centers perfectly across the entire 128px virtual width
+            it.strftime(it.get_width() / 2, 16, id(pixolletta), id(color_perfect), TextAlign::CENTER, "%I:%M %p", time);
+          } else {
+            it.printf(it.get_width() / 2, 16, id(pixolletta), COLOR_ON, TextAlign::CENTER, "Syncing Time...");
+          }
+
+# ==============================================================================
+# 7. AUTOMATION INTERVALS
+# ==============================================================================
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: "America/New_York"
+
+interval:
+  # Sun-Based Auto Brightness Check
+  - interval: 1min
+    then:
+      - lambda: |-
+          if (id(auto_brightness_switch).state && id(sntp_time).now().is_valid()) {
+            
+            float sun_angle = id(boston_sun).elevation();
+            int target;
+            
+            if (sun_angle < 0.0) {
+              target = 10;        // Night
+            } else if (sun_angle < 20.0) {
+              target = 100;       // Dawn / Dusk
+            } else {
+              target = 200;       // Day
+            }
+            
+            if (id(current_brightness) != target) {
+              id(current_brightness) = target;
+              id(matrix).set_brightness(target);
+              id(brightness_slider).publish_state(target);
+            }
+          }
+
+  # Page Flipper
+  - interval: 10s
+    then:
+      - display.page.show_next: matrix
+      - component.update: matrix
+
+  # Periodic Weather Fetcher
+  - interval: 3min
+    id: weather_fetcher
+    then:
+      - script.execute: fetch_weather
+
+# ==============================================================================
+# 8. FONTS, COLORS & DATA
+# ==============================================================================
+font:
+  - file: "fonts/Pixolletta8px.ttf"
+    id: pixolletta
+    size: 10
+    glyphs: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?()"''-+/*=%@#[]{}<>|&^~ °'
+
+color:
+  - id: route_1_color
+    hex: "FFC72C" # Yellow
+  - id: route_2_color
+    hex: "80276C" # Purple
+  - id: color_cold
+    hex: "00BFFF" # Deep Sky Blue
+  - id: color_hot
+    hex: "FF5733" # Red/Orange
+  - id: color_perfect
+    hex: "00FF7F" # Spring Green
+
+external_components:
+  - source: github://tjhorner/esphome-transit-tracker
+    components: [transit_tracker]
+
+transit_tracker:
+  id: tracker
+  font_id: pixolletta
+  base_url: "wss://tt.horner.tj/"
+  time_id: sntp_time
+  limit: 3
+  scroll_headsigns: true 
+  time_display: arrival
+  show_units: short
+  stops:
+    - stop_id: "${my_stop_1}" 
+      routes: ["${my_route_1}"]
+    - stop_id: "${my_stop_2}" 
+      routes: ["${my_route_2}"]
+  styles:
+    - route_id: "${my_route_1}"
+      name: "${my_name_1}"
+      color: route_1_color
+    - route_id: "${my_route_2}"
+      name: "${my_name_2}"
+      color: route_2_color
+  list_mode: nextPerRoute
