@@ -3,6 +3,8 @@
 A custom physical digital display built to show real-time public transit schedules, localized weather data, and timekeeping. 
 My goal was always to create a fun, smart display which reduces my smartphone dependency and adds to my home decor! 
 
+![Smart_Home_Finished_Product](./Smart-Home-Display/esphome.gif)
+
 > **Acknowledgments:** This project was heavily inspired by and builds upon the open-source [Transit Tracker](https://github.com/EastsideUrbanism/transit-tracker) by **Eastside Urbanism**. Their foundational work, detailed instructions, and open-source framwork made this customized build possible!
 
 > **Note:** This repository documents my personal implementation, custom logic, and physical build architecture. It is not intended as a step-by-step DIY tutorial, but rather a showcase of hardware/software integration.
